@@ -1,0 +1,110 @@
+return {
+    on =    {
+                    timer           = {"at 00:02", "at 15:02", "at *:03"},
+                    httpResponses   = {"Energyzero"}
+            },
+    
+    data =  {
+            dayprices               = { history = true, maxItems = 24 },
+            daypricestmp            = { history = true, maxItems = 24 }
+            },
+
+    logging =   {   
+                    level           =   domoticz.LOG_DEBUG, -- set to LOG_ERROR when script works as expected
+                    marker          =   Energyzero
+                },
+            
+    execute = function(dz, item)
+        
+        local dayprices    = dz.data.dayprices
+        local daypricestmp = dz.data.daypricestmp
+        
+        local alert = dz.devices("Next Hour kWh Price")
+        
+        if (item.isTimer) then
+            
+            if ((item.trigger == "at 00:02") or (item.trigger == "at 15:02")) then -- Because of late prices (22:00 -->) we have to do this again.
+                local fromDate  = (dz.time.rawDate)
+                local tillDate  = (dz.time.rawDate)
+                local interval  = "4"
+                local usageType = "1"
+                local inclBtw   = "true"
+            
+                -- /v1/energyprices?fromDate=2022-11-20T00%3A00%3A00.000Z&tillDate=2022-11-20T23%3A59%3A59.999Z&interval=4&usageType=1&inclBtw=true
+                local URLString = "https://api.energyzero.nl/v1/energyprices?fromDate=" .. fromDate .. "T00%3A00%3A00.000Z&tillDate=" .. tillDate
+                .. "T23%3A59%3A59.999Z&interval=" .. interval .. "&usageType=" .. usageType .. "&inclBtw=" .. inclBtw
+                
+                dz.openURL({
+                    url = URLString,
+                    method = 'GET',
+                    callback = "Energyzero"
+                })
+            
+            elseif ((item.trigger == "at *:03") and (dayprices.size > 0)) then
+                
+                local Price_Low  = dayprices.min()
+                local Price_High = dayprices.max()
+                local Price_Avg  = dayprices.avg()
+                
+                local now = dz.time.rawDate .. ", From " .. dz.time.hour .. ":00 Price: "
+                local alertLevel = dz.ALERTLEVEL_RED
+                
+                if (dayprices.size > dz.time.hour) then
+                    local Price_Now = dayprices.get(dz.time.hour + 1).data -- + 1 because 00:00 = 1 01:00 = 2 enz..
+                
+                    if (Price_Now > Price_Avg) then
+                        alert.updateAlertSensor(alertLevel, now .. Price_Now)
+                    else
+                        alertLevel = dz.ALERTLEVEL_GREEN
+                        alert.updateAlertSensor(alertLevel, now .. Price_Now)
+                    end
+                    -- debug logging
+                    dz.log(Price_Now .. " Atm Price", dz.LOG_DEBUG)
+                else
+                    dz.log("No, or less data in dayprices", dz.LOG_DEBUG)
+                    alertLevel = dz.ALERTLEVEL_YELLOW
+                    alert.updateAlertSensor(alertLevel, now)
+                end    
+                -- debug logging
+                dz.log(Price_Low .. " Lowest price", dz.LOG_DEBUG)
+                dz.log(Price_High .. " Highest price", dz.LOG_DEBUG)
+                dz.log(Price_Avg .. " Avg Price", dz.LOG_DEBUG)
+            else
+                dz.log(item.trigger, dz.LOG_ERROR)
+                dz.log(dayprices.size, dz.LOG_ERROR)
+            end
+        
+        elseif (item.isHTTPResponse) then
+            if (item.ok) then
+                
+                dayprices.reset()
+                daypricestmp.reset()
+                
+                if (item.isJSON) then
+                    -- dz.utils.dumpTable(item.json) -- Only for debug purposes
+                    
+                    for i,v in ipairs(item.json.Prices) do
+                        dz.log(item.json.Prices[i].price, dz.LOG_DEBUG)
+                        daypricestmp.add(item.json.Prices[i].price)
+                    end
+                    
+                    local cnt = daypricestmp.size
+                    
+                    for id = 1, (cnt), 1 do -- we first receive the 00:00 hour then 01:00. Because of shifting 00:00 ends on 24
+                        dayprices.add(daypricestmp.get(id).data)
+                    end
+                        
+                    for id = 1, (cnt), 1 do
+                        dz.log(item.json.Prices[id].readingDate .. " ID: " .. id, dz.LOG_DEBUG)
+                        dz.log(item.json.Prices[id].price, dz.LOG_DEBUG)        -- must be the same
+                        dz.log(dayprices.get(id).data, dz.LOG_DEBUG)            -- as this line
+                    end
+                end
+            else
+                dz.log("No valid response from Energyzero " .. item.statusCode, dz.LOG_ERROR)
+                dz.notify("Telegram BOT", "Energyzero API Failed. No valid response from server", dz.PRIORITY_EMERGENCY, dz.NSS_TELEGRAM)
+            end
+            -- dz.log(item, dz.LOG_DEBUG)
+        end
+    end
+}
